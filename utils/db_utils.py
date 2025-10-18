@@ -2,17 +2,18 @@
 utils/db_utils.py
 Implementação usando python-oracledb (import as oracledb).
 Fornece: conectar_oracle, desconectar_oracle, testar_conexao,
-         salvar_xml, listar_xmls.
+         salvar_xml, listar_xmls, listar_agentes.
 """
 
 import oracledb
+import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 
 # ---------- CONFIGURAÇÃO OPCIONAL DO INSTANT CLIENT (thick mode) ----------
 # Se precisar usar o Instant Client (modo thick), descomente e ajuste o caminho:
 # oracledb.init_oracle_client(lib_dir=r"C:\oracle\instantclient_19_11")
 
-# ---------- FUNÇÕES ----------
+# ---------- FUNÇÕES DE CONEXÃO ----------
 def conectar_oracle(usuario: str, senha: str, tns: str):
     """
     Abre e retorna uma conexão oracledb.Connection.
@@ -20,7 +21,6 @@ def conectar_oracle(usuario: str, senha: str, tns: str):
       - "host:port/service_name"  (ex: "localhost:1521/XEPDB1")
       - um alias TNS (se Instant Client e tnsnames.ora estiverem configurados)
     """
-    # Em modo thin (padrão) basta passar dsn = tns
     conn = oracledb.connect(user=usuario, password=senha, dsn=tns)
     return conn
 
@@ -45,14 +45,16 @@ def testar_conexao(conn):
         return False
 
 
+# ---------- FUNÇÕES DE XML ----------
 def salvar_xml(conn, tabela: str, xml_conteudo: str):
     """
     Insere um XML na tabela informada.
     Atenção: tabela deve ter coluna XML_CONTEUDO do tipo XMLTYPE ou CLOB conforme o DB.
-    Usamos bind para evitar SQL injection.
     """
-    sql = f"INSERT INTO {tabela} (ID, XML_CONTEUDO) VALUES (SEQ_{tabela}.NEXTVAL, XMLType(:xml))"
-    # Observação: se sua sequência tiver outro nome, ajuste.
+    sql = f"""
+        INSERT INTO {tabela} (ID, XML_CONTEUDO)
+        VALUES (SEQ_{tabela}.NEXTVAL, XMLType(:xml))
+    """
     cur = conn.cursor()
     try:
         cur.execute(sql, {"xml": xml_conteudo})
@@ -79,12 +81,60 @@ def listar_xmls(conn, tabela: str):
         for r in cur.fetchall():
             id_val = r[0]
             xml_val = r[1]
-            # oracledb já devolve string ou LOB; se for LOB, chamar read()
             if hasattr(xml_val, "read"):
                 xml_text = xml_val.read()
             else:
                 xml_text = str(xml_val) if xml_val is not None else ""
             rows.append((id_val, xml_text))
         return rows
+    finally:
+        cur.close()
+
+
+# ---------- NOVA FUNÇÃO: LISTAR AGENTES ----------
+def listar_agentes(conn):
+    """
+    Retorna lista de agentes cadastrados na tabela XML_AGENTES.
+    Faz o parse básico do XML para extrair Nome e TipoPessoa.
+
+    Retorna lista de dicionários:
+    [
+        {"id": 1, "nome": "Empresa XPTO", "tipo_pessoa": "Pessoa Jurídica", "xml": "<xml...>"},
+        {"id": 2, "nome": "João Silva", "tipo_pessoa": "Pessoa Física", "xml": "<xml...>"},
+    ]
+    """
+    agentes = []
+    try:
+        cur = conn.cursor()
+        sql = """
+            SELECT ID, XMLSERIALIZE(CONTENT XML_CONTEUDO AS CLOB)
+            FROM XML_AGENTES
+            ORDER BY ID DESC
+        """
+        cur.execute(sql)
+
+        for id_val, xml_val in cur.fetchall():
+            if hasattr(xml_val, "read"):
+                xml_text = xml_val.read()
+            else:
+                xml_text = str(xml_val) if xml_val is not None else ""
+
+            nome = tipo_pessoa = ""
+            try:
+                root = ET.fromstring(xml_text)
+                nome = root.findtext("Nome", "").strip()
+                tipo_pessoa = root.findtext("TipoPessoa", "").strip()
+            except Exception:
+                nome = "[XML Inválido]"
+                tipo_pessoa = "Desconhecido"
+
+            agentes.append({
+                "id": id_val,
+                "nome": nome or "[Sem Nome]",
+                "tipo_pessoa": tipo_pessoa or "N/A",
+                "xml": xml_text
+            })
+
+        return agentes
     finally:
         cur.close()

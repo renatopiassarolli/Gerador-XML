@@ -1,44 +1,53 @@
 # xml_screens/xml_contas_pagar.py
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QLineEdit, QTextEdit, QPushButton,
-    QMessageBox, QDialog, QHBoxLayout, QTableWidget, QTableWidgetItem, QFileDialog, QApplication
+    QMessageBox, QDialog, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QFileDialog, QApplication
 )
 from PyQt5.QtCore import Qt, QRegExp
 from PyQt5.QtGui import QRegExpValidator
 from utils.xml_utils import gerar_xml_pretty
-from utils.db_utils import salvar_xml, listar_xmls
+from utils.db_utils import salvar_xml, listar_xmls, listar_agentes
+import xml.etree.ElementTree as ET
 import re
 from datetime import datetime
 
 
 class TelaContasPagar(QWidget):
-    """Tela para geração e consulta de XMLs de Contas a Pagar"""
+    """Tela para geração e consulta de XMLs de Contas a Pagar vinculados a um Agente"""
 
     def __init__(self, parent):
         super().__init__()
         self.parent = parent
         layout = QVBoxLayout()
 
+        if getattr(self.parent, "conn", None):
+            agentes = listar_agentes(self.parent.conn)
+            for agente in agentes:
+                self.combo_agente.addItem(f"{agente['nome']} ({agente['tipo_pessoa']})", agente["id"])
+
         # Campos principais
-        self.fornecedor = QLineEdit()
-        self.cnpj_fornecedor = QLineEdit()
-        self.cnpj_fornecedor.setInputMask("00.000.000/0000-00;_")
+        self.agente_id = None  # Armazena o ID do agente selecionado
+        self.agente_nome = QLineEdit()
+        self.agente_nome.setReadOnly(True)
+        self.agente_cnpj = QLineEdit()
+        self.agente_cnpj.setReadOnly(True)
+        self.agente_email = QLineEdit()
+        self.agente_email.setReadOnly(True)
+
+        self.btn_selecionar_agente = QPushButton("Selecionar Agente")
+        self.btn_selecionar_agente.clicked.connect(self.selecionar_agente)
+
+        self.descricao = QLineEdit()
+        self.valor = QLineEdit()
+        valor_regex = QRegExp(r"^\d{1,9}([.,]\d{0,2})?$")
+        self.valor.setValidator(QRegExpValidator(valor_regex))
 
         self.data_emissao = QLineEdit()
         self.data_emissao.setInputMask("00/00/0000;_")
 
         self.data_vencimento = QLineEdit()
         self.data_vencimento.setInputMask("00/00/0000;_")
-
-        self.valor = QLineEdit()
-        valor_regex = QRegExp(r"^\d{1,9}([.,]\d{0,2})?$")
-        self.valor.setValidator(QRegExpValidator(valor_regex))
-
-        self.descricao = QLineEdit()
-        self.email_fornecedor = QLineEdit()
-
-        email_regex = QRegExp(r"^[\w\.-]+@[\w\.-]+\.\w+$")
-        self.email_fornecedor.setValidator(QRegExpValidator(email_regex))
 
         # Botões principais
         self.btn_gerar = QPushButton("Gerar XML")
@@ -54,16 +63,16 @@ class TelaContasPagar(QWidget):
         self.xml_preview.setReadOnly(True)
 
         # Layout
-        layout.addWidget(QLabel("Fornecedor:"))
-        layout.addWidget(self.fornecedor)
+        layout.addWidget(QLabel("Agente Vinculado:"))
+        layout.addWidget(self.btn_selecionar_agente)
+        layout.addWidget(QLabel("Nome:"))
+        layout.addWidget(self.agente_nome)
+        layout.addWidget(QLabel("CNPJ/CPF:"))
+        layout.addWidget(self.agente_cnpj)
+        layout.addWidget(QLabel("Email:"))
+        layout.addWidget(self.agente_email)
 
-        layout.addWidget(QLabel("CNPJ do Fornecedor:"))
-        layout.addWidget(self.cnpj_fornecedor)
-
-        layout.addWidget(QLabel("Email do Fornecedor (opcional):"))
-        layout.addWidget(self.email_fornecedor)
-
-        layout.addWidget(QLabel("Descrição:"))
+        layout.addWidget(QLabel("Descrição da Conta:"))
         layout.addWidget(self.descricao)
 
         layout.addWidget(QLabel("Valor (R$):"))
@@ -88,29 +97,100 @@ class TelaContasPagar(QWidget):
         self.setLayout(layout)
 
     # ---------------------------------------------------------------------
+    def selecionar_agente(self):
+        """Abre lista de agentes cadastrados para vincular à conta"""
+        if not getattr(self.parent, "conn", None):
+            QMessageBox.warning(self, "Erro", "Conecte-se ao Oracle primeiro!")
+            return
 
+        try:
+            agentes = listar_xmls(self.parent.conn, "XML_AGENTES")
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Erro ao consultar agentes:\n{e}")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Selecionar Agente")
+        layout = QVBoxLayout()
+
+        table = QTableWidget()
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(["ID", "Nome", "Tipo"])
+        table.setRowCount(len(agentes))
+        table.setColumnWidth(0, 80)
+        table.setColumnWidth(1, 250)
+        table.setColumnWidth(2, 150)
+
+        for i, (id_val, xml_val) in enumerate(agentes):
+            xml_texto = xml_val if xml_val is not None else ""
+            try:
+                root = ET.fromstring(xml_texto)
+                nome = root.findtext("Nome", "")
+                tipo = root.findtext("TipoPessoa", "")
+            except ET.ParseError:
+                nome = "[XML inválido]"
+                tipo = "N/A"
+
+            table.setItem(i, 0, QTableWidgetItem(str(id_val)))
+            table.setItem(i, 1, QTableWidgetItem(nome))
+            table.setItem(i, 2, QTableWidgetItem(tipo))
+
+        def on_select():
+            row = table.currentRow()
+            if row < 0:
+                QMessageBox.warning(dialog, "Atenção", "Selecione um agente da lista.")
+                return
+            id_val = int(table.item(row, 0).text())
+            xml_texto = agentes[row][1]
+            self.preencher_dados_agente(id_val, xml_texto)
+            dialog.accept()
+
+        btn_selecionar = QPushButton("Selecionar")
+        btn_cancelar = QPushButton("Cancelar")
+        btn_selecionar.clicked.connect(on_select)
+        btn_cancelar.clicked.connect(dialog.reject)
+
+        botoes = QHBoxLayout()
+        botoes.addWidget(btn_selecionar)
+        botoes.addWidget(btn_cancelar)
+
+        layout.addWidget(table)
+        layout.addLayout(botoes)
+        dialog.setLayout(layout)
+        dialog.resize(600, 400)
+        dialog.exec_()
+
+    # ---------------------------------------------------------------------
+    def preencher_dados_agente(self, id_val, xml_texto):
+        """Preenche campos com base no XML do agente selecionado"""
+        try:
+            root = ET.fromstring(xml_texto)
+            self.agente_id = id_val
+            self.agente_nome.setText(root.findtext("Nome", ""))
+            self.agente_cnpj.setText(root.findtext("CNPJ", root.findtext("CPF", "")))
+            self.agente_email.setText(root.findtext("Email", ""))
+        except ET.ParseError:
+            QMessageBox.critical(self, "Erro", "Falha ao ler XML do agente selecionado.")
+
+    # ---------------------------------------------------------------------
     def validar_campos(self):
-        """Valida todos os campos obrigatórios e formatos"""
-        if not self.fornecedor.text().strip():
-            return "O campo Fornecedor é obrigatório."
+        """Valida campos obrigatórios"""
+        if not self.agente_id:
+            return "Selecione um agente antes de continuar."
 
-        cnpj = self.cnpj_fornecedor.text().strip().replace(".", "").replace("/", "").replace("-", "")
-        if len(cnpj) != 14:
-            return "CNPJ inválido ou incompleto."
+        if not self.descricao.text().strip():
+            return "O campo Descrição é obrigatório."
 
         if not self.valor.text().strip():
             return "O campo Valor é obrigatório."
 
-        # Verifica se o valor é numérico
-        valor_txt = self.valor.text().replace(",", ".")
         try:
-            valor_float = float(valor_txt)
-            if valor_float <= 0:
+            valor = float(self.valor.text().replace(",", "."))
+            if valor <= 0:
                 return "O valor deve ser maior que zero."
         except ValueError:
             return "O campo Valor deve conter apenas números."
 
-        # Verifica formato das datas
         for campo, nome in [(self.data_emissao, "Data de Emissão"), (self.data_vencimento, "Data de Vencimento")]:
             data_txt = campo.text().strip()
             if not data_txt or "_" in data_txt:
@@ -120,42 +200,34 @@ class TelaContasPagar(QWidget):
             except ValueError:
                 return f"{nome} está em formato inválido. Use dd/mm/aaaa."
 
-        # Valida e-mail (se preenchido)
-        email = self.email_fornecedor.text().strip()
-        if email and not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", email):
-            return "E-mail do fornecedor inválido."
-
-        return None  # sem erros
+        return None
 
     # ---------------------------------------------------------------------
-
     def gerar_xml(self):
-        """Gera XML validado"""
+        """Gera XML de Conta a Pagar vinculado ao agente"""
         erro = self.validar_campos()
         if erro:
             QMessageBox.warning(self, "Erro de validação", erro)
             return
 
         dados = {
-            "Fornecedor": self.fornecedor.text().strip(),
-            "CNPJ": self.cnpj_fornecedor.text().strip(),
+            "AgenteID": str(self.agente_id),
+            "AgenteNome": self.agente_nome.text().strip(),
+            "CNPJ_CPF": self.agente_cnpj.text().strip(),
+            "EmailAgente": self.agente_email.text().strip(),
             "Descricao": self.descricao.text().strip(),
             "Valor": self.valor.text().strip().replace(",", "."),
             "DataEmissao": self.data_emissao.text().strip(),
             "DataVencimento": self.data_vencimento.text().strip(),
         }
 
-        if self.email_fornecedor.text().strip():
-            dados["EmailFornecedor"] = self.email_fornecedor.text().strip()
-
         xml_pretty = gerar_xml_pretty("ContaPagar", dados)
         self.xml_preview.setPlainText(xml_pretty)
         QMessageBox.information(self, "Sucesso", "XML gerado com sucesso!")
 
     # ---------------------------------------------------------------------
-
     def salvar_xml(self):
-        """Salva o XML no banco Oracle"""
+        """Salva XML no Oracle"""
         if not getattr(self.parent, "conn", None):
             QMessageBox.warning(self, "Erro", "Conecte-se ao Oracle primeiro!")
             return
@@ -172,9 +244,8 @@ class TelaContasPagar(QWidget):
             QMessageBox.critical(self, "Erro", f"Erro ao salvar XML:\n{e}")
 
     # ---------------------------------------------------------------------
-
     def consultar_xmls(self):
-        """Consulta XMLs gravados"""
+        """Consulta XMLs de Contas a Pagar"""
         if not getattr(self.parent, "conn", None):
             QMessageBox.warning(self, "Erro", "Conecte-se ao Oracle primeiro!")
             return
@@ -218,9 +289,8 @@ class TelaContasPagar(QWidget):
         dialog.exec_()
 
     # ---------------------------------------------------------------------
-
     def ver_xml(self, id_val, xml_texto):
-        """Visualiza XML completo com botão de copiar/salvar"""
+        """Exibe XML completo com opção de copiar/salvar"""
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Visualizar XML - ID {id_val}")
         layout = QVBoxLayout()
