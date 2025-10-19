@@ -288,3 +288,4 @@ class TelaAgente(QWidget):
         dlg.setLayout(layout)
         dlg.resize(700, 550)
         dlg.exec_()
+        

@@ -13,6 +13,13 @@ from contextlib import contextmanager
 # Se precisar usar o Instant Client (modo thick), descomente e ajuste o caminho:
 # oracledb.init_oracle_client(lib_dir=r"C:\oracle\instantclient_19_11")
 
+# Inicializa o Oracle Client (modo thick)
+try:
+    oracledb.init_oracle_client(lib_dir=r"C:\oracle\instantclient_19_28")
+except oracledb.ProgrammingError:
+    # Já inicializado ou ambiente configurado
+    pass
+
 # ---------- FUNÇÕES DE CONEXÃO ----------
 def conectar_oracle(usuario: str, senha: str, tns: str):
     """
